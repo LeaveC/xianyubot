@@ -64,53 +64,84 @@ def trans_cookies(cookies_str):
 async def get_login_cookies():
     """
     打开Firefox浏览器，访问闲鱼消息页面，等待用户登录，并获取登录cookies
+    如果存在已保存的浏览器状态，将尝试恢复该状态
     
     Returns:
         dict: 包含cookies和localStorage的字典
     """
     cookies_data = {}
+    # 获取状态文件路径
+    state_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'playwright_state.json'))
+    
     try:
         logger.info("启动Firefox浏览器获取闲鱼登录凭证")
         async with async_playwright() as p:
+            # 创建浏览器上下文选项
+            context_options = {}
+            
+            # 检查是否存在已保存的状态
+            if os.path.exists(state_path):
+                logger.info("找到已保存的浏览器状态，尝试恢复...")
+                try:
+                    with open(state_path, 'r', encoding='utf-8') as f:
+                        storage_state = json.load(f)
+                    context_options["storage_state"] = storage_state
+                except Exception as e:
+                    logger.error(f"加载浏览器状态失败: {e}")
+            
             # 启动Firefox浏览器
             browser = await p.firefox.launch(headless=False)
             
+            # 创建新的浏览器上下文，并应用已保存的状态(如果有)
+            context = await browser.new_context(**context_options)
+            
             # 创建新页面
-            page = await browser.new_page()
+            page = await context.new_page()
             logger.info("正在打开闲鱼消息页面")
             
             # 访问闲鱼消息页面
             await page.goto("https://www.goofish.com/im")
             
-            # 等待用户手动登录
-            logger.info("请在打开的浏览器中手动登录闲鱼")
-            logger.info("等待检测到登录状态...")
-            
-            # 等待登录成功的标识
-            # 通常登录后会出现一些特定元素，这里我们检查登录后特有的cookies
-            login_success = False
-            max_wait_time = 300  # 最大等待时间5分钟
-            start_time = asyncio.get_event_loop().time()
-            
-            while not login_success and (asyncio.get_event_loop().time() - start_time) < max_wait_time:
-                # 获取当前cookies
-                cookies = await page.context.cookies()
-                
-                # 检查是否有登录成功的标识cookies
+            # 检查是否已登录
+            already_logged_in = False
+            try:
+                # 等待5秒看是否有登录成功的标识
+                cookies = await context.cookies()
                 if any(cookie["name"] == "havana_lgc2_77" for cookie in cookies):
-                    login_success = True
-                    break
+                    logger.info("通过已保存状态成功恢复登录")
+                    already_logged_in = True
+            except Exception:
+                already_logged_in = False
+            
+            # 如果没有登录，则等待用户手动登录
+            if not already_logged_in:
+                logger.info("未检测到登录状态，请在打开的浏览器中手动登录闲鱼")
+                logger.info("等待检测到登录状态...")
                 
-                # 等待2秒后再次检查
-                await asyncio.sleep(2)
+                # 等待登录成功的标识
+                login_success = False
+                max_wait_time = 300  # 最大等待时间5分钟
+                start_time = asyncio.get_event_loop().time()
+                
+                while not login_success and (asyncio.get_event_loop().time() - start_time) < max_wait_time:
+                    # 获取当前cookies
+                    cookies = await context.cookies()
+                    
+                    # 检查是否有登录成功的标识cookies
+                    if any(cookie["name"] == "havana_lgc2_77" for cookie in cookies):
+                        login_success = True
+                        break
+                    
+                    # 等待2秒后再次检查
+                    await asyncio.sleep(2)
+                
+                if not login_success:
+                    logger.warning("等待登录超时，可能未成功登录")
+                    await browser.close()
+                    return None
             
-            if not login_success:
-                logger.warning("等待登录超时，可能未成功登录")
-                await browser.close()
-                return None
-            
-            # 获取cookies
-            cookies = await page.context.cookies()
+            # 获取cookies和localStorage
+            cookies = await context.cookies()
             cookies_dict = {cookie["name"]: cookie["value"] for cookie in cookies}
             
             # 获取localStorage数据
@@ -132,6 +163,15 @@ async def get_login_cookies():
             with open(save_path, 'w', encoding='utf-8') as f:
                 json.dump(cookies_data, f, ensure_ascii=False, indent=2)
             logger.info(f"登录凭证已保存到: {save_path}")
+            
+            # 保存浏览器状态到文件
+            try:
+                storage_state = await context.storage_state()
+                with open(state_path, 'w', encoding='utf-8') as f:
+                    json.dump(storage_state, f, ensure_ascii=False, indent=2)
+                logger.info(f"浏览器状态已保存到: {state_path}")
+            except Exception as e:
+                logger.error(f"保存浏览器状态失败: {e}")
             
             # 关闭浏览器
             await browser.close()
@@ -228,4 +268,21 @@ def decrypt(data):
     if not xianyu_js:
         logger.error("JS模块未初始化，无法解密数据")
         return None
-    return xianyu_js.call('decrypt', data) 
+    return xianyu_js.call('decrypt', data)
+
+def cookies_dict_to_str(cookies_dict):
+    """
+    将cookies字典转换为字符串格式
+    
+    Args:
+        cookies_dict (dict): Cookies字典
+        
+    Returns:
+        str: 格式化的cookies字符串，例如"name1=value1; name2=value2"
+    """
+    try:
+        cookies_str = "; ".join([f"{k}={v}" for k, v in cookies_dict.items()])
+        return cookies_str
+    except Exception as e:
+        logger.error(f"转换cookies字典为字符串时出错: {e}")
+        return "" 

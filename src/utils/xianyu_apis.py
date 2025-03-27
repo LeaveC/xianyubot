@@ -64,6 +64,11 @@ class XianyuApis:
                 'data': data_val,
             }
             
+            # 检查cookies中是否存在token字段
+            if '_m_h5_tk' not in cookies:
+                logger.error("获取token失败: cookies中缺少_m_h5_tk字段")
+                return {"ret": ["FAIL_SYS_TOKEN_EMPTY::令牌为空"], "data": {}, "success": False}
+            
             token = cookies['_m_h5_tk'].split('_')[0]
             sign = generate_sign(params['t'], token, data_val)
             params['sign'] = sign
@@ -73,15 +78,32 @@ class XianyuApis:
             # 检查响应状态
             if response.status_code != 200:
                 logger.error(f"获取token失败，状态码: {response.status_code}")
-                return None
+                return {"ret": [f"HTTP_ERROR::{response.status_code}"], "data": {}, "success": False}
                 
             # 解析响应
             res_json = response.json()
+            
+            # 检查token是否过期
+            if "ret" in res_json and isinstance(res_json["ret"], list) and len(res_json["ret"]) > 0:
+                error_msg = res_json["ret"][0]
+                logger.warning(f"Token API返回错误: {error_msg}")
+                
+                # 常见的token过期错误代码
+                token_expired_keywords = [
+                    "TOKEN_EMPTY", "TOKEN_EXPIRED", "SESSION_EXPIRED", "SID_INVALID", 
+                    "FAIL_SYS_TOKEN_EXOIRED", "FAIL_SYS_TOKEN_EMPTY"
+                ]
+                
+                # 如果是token过期相关错误，添加明确的"令牌过期"标记
+                if any(keyword in error_msg for keyword in token_expired_keywords):
+                    res_json["ret"][0] += "::令牌过期"
+                    logger.error(f"检测到token已过期: {error_msg}")
+            
             return res_json
             
         except Exception as e:
             logger.error(f"获取token时发生错误: {str(e)}")
-            return None
+            return {"ret": [f"EXCEPTION::{str(e)}"], "data": {}, "success": False}
             
     def get_item_info(self, item_id, cookies):
         """

@@ -14,7 +14,7 @@ import concurrent.futures
 from queue import Queue
 from threading import Thread
 
-from utils.xianyu_utils import generate_mid, generate_uuid, trans_cookies, generate_device_id, decrypt
+from utils.xianyu_utils import generate_mid, generate_uuid, trans_cookies, generate_device_id, decrypt, get_login_cookies, cookies_dict_to_str
 from utils.xianyu_apis import XianyuApis
 from core.context_manager import ChatContextManager
 
@@ -81,7 +81,8 @@ class XianyuWebSocket:
             token_info = xianyu_apis.get_token(self.cookies, self.device_id)
             if not token_info or 'data' not in token_info or 'accessToken' not in token_info['data']:
                 logger.error(f"获取token失败: {token_info}")
-                raise ValueError("获取token失败")
+                error_message = f"获取token失败: {token_info}"
+                raise ValueError(error_message)
                 
             token = token_info['data']['accessToken']
             
@@ -823,6 +824,34 @@ class XianyuWebSocket:
                     await self.heartbeat_task
                 except asyncio.CancelledError:
                     pass
+            # 等待5秒后重连
+            await asyncio.sleep(5)
+        except ValueError as e:
+            error_msg = str(e)
+            if "获取token失败" in error_msg and "令牌过期" in error_msg:
+                logger.warning("检测到token过期，尝试重新获取cookies...")
+                # 使用playwright获取新的cookies
+                new_cookies_data = await get_login_cookies()
+                if new_cookies_data and "cookies" in new_cookies_data:
+                    # 更新cookies
+                    new_cookies_str = cookies_dict_to_str(new_cookies_data["cookies"])
+                    self.cookies_str = new_cookies_str
+                    self.cookies = new_cookies_data["cookies"]
+                    
+                    # 从cookies中更新用户ID
+                    if "unb" in self.cookies:
+                        self.myid = self.cookies["unb"]
+                    
+                    # 更新设备ID
+                    self.device_id = generate_device_id(self.myid)
+                    
+                    logger.info("成功更新cookies，准备重新连接...")
+                    # 不等待，立即重新连接
+                    return
+                else:
+                    logger.error("自动获取新cookies失败")
+            else:
+                logger.error(f"WebSocket连接出错: {e}")
             # 等待5秒后重连
             await asyncio.sleep(5)
         except Exception as e:
