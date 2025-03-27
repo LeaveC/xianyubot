@@ -228,7 +228,7 @@ class XianyuReplyBot:
         
         # 加载统一提示词
         try:
-            prompt_path = os.path.join("xianyubot", "prompts", "unified_prompt.txt")
+            prompt_path = os.path.join("prompts", "unified_prompt.txt")
             with open(prompt_path, "r", encoding="utf-8") as f:
                 unified_prompt = f.read()
                 logger.info(f"已加载统一提示词，长度: {len(unified_prompt)} 字符")

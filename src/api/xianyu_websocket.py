@@ -615,6 +615,24 @@ class XianyuWebSocket:
             if "2" in message["1"]:
                 cid = message["1"]["2"].split('@')[0] if '@' in message["1"]["2"] else message["1"]["2"]
             
+            # 消息去重检查 - 计算消息指纹
+            import hashlib
+            import time
+            fingerprint = hashlib.md5(f"{send_user_id}:{send_message}:{item_id}".encode()).hexdigest()
+            current_time = time.time()
+            
+            # 检查是否为最近处理过的相同消息
+            if hasattr(self, 'processed_messages') and fingerprint in self.processed_messages:
+                time_diff = current_time - self.processed_messages[fingerprint]
+                window = self.processed_window if hasattr(self, 'processed_window') else 30
+                if time_diff < window:
+                    logger.warning(f"handle_message检测到短时间内({time_diff:.1f}秒)的重复消息，跳过处理: {send_message}")
+                    return
+            
+            # 更新消息指纹缓存
+            if hasattr(self, 'processed_messages'):
+                self.processed_messages[fingerprint] = current_time
+            
             # 构建处理任务数据
             task_data = {
                 "message": message,  # 原始消息
@@ -624,7 +642,8 @@ class XianyuWebSocket:
                 "item_id": item_id,
                 "item_description": item_description,
                 "cid": cid,
-                "message_id": message_id
+                "message_id": message_id,
+                "fingerprint": fingerprint  # 添加指纹用于消息唯一性跟踪
             }
             
             # 加入消息队列处理
@@ -851,6 +870,41 @@ class XianyuLive(XianyuWebSocket):
         self.message_queue = Queue()
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
         
+        # 添加全局系统通知消息缓存
+        self.recent_responses = {}  # 格式: {user_id: {"message_type": str, "timestamp": float, "count": int}}
+        self.system_notice_window = 60  # 系统通知60秒内不重复回复
+        
+        # 消息处理指纹缓存，用于检测重复消息
+        self.processed_messages = {}  # 格式: {fingerprint: timestamp}
+        self.processed_window = 30  # 30秒内相同指纹的消息视为重复
+        
+        # 系统通知关键词列表 - 扩展更全面的系统通知关键词
+        self.system_notices = [
+            # 发货相关通知
+            "你已发货", "发来一条新消息", "已付款", "准备发货", "已下单", 
+            "已经付款", "买家留言", "快递信息", "物流更新", "发货提醒",
+            "等待卖家发货", "卖家已发货", "已发货", "发货成功", "订单发货",
+            
+            # 其他系统通知类型
+            "系统通知", "已收货", "已评价", "已退款", "订单更新",
+            "交易完成", "交易关闭", "退款申请", "退款成功", "申请售后",
+            "订单变更", "支付成功", "等待付款", "超时未付款"
+        ]
+        
+        # 专门用于识别发货相关通知的关键词
+        self.shipping_keywords = [
+            "发货", "已发货", "等待卖家发货", "发货通知", "物流", 
+            "运单", "快递单", "包裹", "寄件", "配送", 
+            "派送", "待发货", "已打包", "发货成功"
+        ]
+        
+        # 最近通知缓存，用于极短时间内的系统通知去重
+        self._last_system_notification = {
+            "key": "",
+            "time": 0,
+            "message": ""
+        }
+        
         # 初始化父类，这里不传递消息处理函数，避免循环引用
         super().__init__(cookies_str, None)
         
@@ -865,6 +919,76 @@ class XianyuLive(XianyuWebSocket):
             worker.daemon = True
             worker.start()
             self.worker_threads.append(worker)
+            
+        # 启动定期清理系统通知缓存的线程
+        self.cache_cleaner = Thread(target=self._clean_system_notice_cache_worker, args=())
+        self.cache_cleaner.daemon = True
+        self.cache_cleaner.start()
+        
+        # 启动定期清理消息指纹缓存的线程
+        self.fingerprint_cleaner = Thread(target=self._clean_message_fingerprints_worker, args=())
+        self.fingerprint_cleaner.daemon = True
+        self.fingerprint_cleaner.start()
+    
+    def _clean_system_notice_cache_worker(self):
+        """定期清理过期的系统通知缓存"""
+        import time
+        
+        while True:
+            try:
+                # 每5分钟清理一次
+                time.sleep(300)
+                
+                # 清理过期的缓存
+                current_time = time.time()
+                users_to_clean = []
+                notices_to_clean = {}
+                
+                for user_id, notices in self.recent_responses.items():
+                    notices_to_clean[user_id] = []
+                    all_expired = True
+                    
+                    for notice_type, notice_data in notices.items():
+                        time_diff = current_time - notice_data["timestamp"]
+                        # 检查是否具有扩展窗口标记（主要用于发货相关通知）
+                        has_extended_window = notice_data.get("extended_window", False)
+                        
+                        # 根据是否有扩展窗口使用不同的过期时间
+                        expiry_time = 7200 if has_extended_window else self.system_notice_window * 2  # 扩展窗口为2小时
+                        
+                        # 如果超过系统通知窗口时间，标记为需要清理
+                        if time_diff > expiry_time:
+                            notices_to_clean[user_id].append(notice_type)
+                            logger.debug(f"标记清理: 用户 {user_id} 的 '{notice_type}' 通知已过期 {time_diff:.0f}秒 (限制: {expiry_time}秒)")
+                        else:
+                            all_expired = False
+                            if has_extended_window:
+                                logger.debug(f"保留扩展窗口通知: 用户 {user_id} 的 '{notice_type}' 通知存在 {time_diff:.0f}秒 (限制: {expiry_time}秒)")
+                    
+                    # 如果该用户的所有通知都已过期，可以清理整个用户记录
+                    if all_expired and len(notices) > 0:
+                        users_to_clean.append(user_id)
+                
+                # 执行清理
+                for user_id in users_to_clean:
+                    if user_id in self.recent_responses:
+                        del self.recent_responses[user_id]
+                        logger.debug(f"清理用户 {user_id} 的所有系统通知缓存")
+                
+                for user_id, notices in notices_to_clean.items():
+                    if user_id in self.recent_responses:
+                        for notice_type in notices:
+                            if notice_type in self.recent_responses[user_id]:
+                                del self.recent_responses[user_id][notice_type]
+                                logger.debug(f"清理用户 {user_id} 的 '{notice_type}' 系统通知缓存")
+                
+                # 日志记录清理状态
+                if users_to_clean or any(notices for notices in notices_to_clean.values()):
+                    logger.info(f"系统通知缓存清理完成: 清理了 {len(users_to_clean)} 个用户记录")
+            except Exception as e:
+                logger.error(f"清理系统通知缓存时出错: {e}")
+                # 异常后等待30秒再继续
+                time.sleep(30)
     
     def _message_worker(self):
         """
@@ -872,10 +996,12 @@ class XianyuLive(XianyuWebSocket):
         从队列中获取消息并处理
         """
         while True:
+            task_completed = False  # 添加标记，避免重复调用task_done()
             try:
                 # 从队列中获取消息
                 message_data = self.message_queue.get()
                 if message_data is None:  # 结束信号
+                    self.message_queue.task_done()
                     break
                     
                 task_data = message_data["task_data"]
@@ -890,8 +1016,204 @@ class XianyuLive(XianyuWebSocket):
                 item_description = task_data["item_description"]
                 cid = task_data["cid"]
                 message_id = task_data.get("message_id")  # 获取消息ID，用于引用回复
+                fingerprint = task_data.get("fingerprint", "")  # 获取消息指纹
+                
+                # 再次检查消息指纹，确保没有其他线程已经处理过相同的消息
+                # 这是双重保险，防止短时间内相同消息通过不同渠道进入队列
+                if fingerprint:
+                    import time
+                    current_time = time.time()
+                    last_processed_time = self.processed_messages.get(fingerprint, 0)
+                    
+                    # 只有当指纹匹配且时间差在窗口内时才认为是重复
+                    time_diff = current_time - last_processed_time
+                    if (last_processed_time > 0 and 
+                        time_diff < self.processed_window and
+                        time_diff > 0.001):  # 添加最小时间差阈值，防止误判
+                        logger.warning(f"工作线程检测到短时间内({time_diff:.2f}秒)的重复消息，跳过处理: {send_message}")
+                        # 标记任务为完成 - 只有当消息确实是重复时才标记
+                        self.message_queue.task_done()
+                        task_completed = True
+                        continue
+                    
+                    # 更新处理时间戳，表示正在处理该消息
+                    if not fingerprint in self.processed_messages or time_diff > self.processed_window:
+                        # 只有新消息或超过窗口的旧消息才更新时间戳
+                        self.processed_messages[fingerprint] = current_time
                 
                 logger.info(f"处理用户 {send_user_name} 的消息: {send_message}")
+                
+                # 消息分析日志 - 仅对可能的系统通知进行详细日志
+                if send_message in ["发来一条新消息", "新消息", "系统通知"] or any(notice in send_message for notice in self.system_notices):
+                    logger.info("----------- 系统通知分析开始 -----------")
+                    
+                    # 提取关键字段
+                    if isinstance(message, dict) and "1" in message and isinstance(message["1"], dict):
+                        # 尝试提取消息各关键部分
+                        if "10" in message["1"] and isinstance(message["1"]["10"], dict):
+                            biz_tag = message["1"]["10"].get("bizTag", "")
+                            ext_json = message["1"]["10"].get("extJson", "")
+                            reminder_title = message["1"]["10"].get("reminderTitle", "")
+                            reminder_content = message["1"]["10"].get("reminderContent", "")
+                            reminder_url = message["1"]["10"].get("reminderUrl", "")
+                            
+                            logger.info(f"系统通知标题: {reminder_title}")
+                            logger.info(f"系统通知内容: {reminder_content}")
+                            logger.info(f"系统通知URL: {reminder_url}")
+                            
+                            # 尝试解析业务标签
+                            if biz_tag:
+                                try:
+                                    biz_tag_obj = json.loads(biz_tag)
+                                    task_name = biz_tag_obj.get("taskName", "")
+                                    task_id = biz_tag_obj.get("taskId", "")
+                                    logger.info(f"系统通知任务名称: {task_name}")
+                                    logger.info(f"系统通知任务ID: {task_id}")
+                                except Exception as e:
+                                    logger.warning(f"解析bizTag失败: {e}")
+                            
+                            # 尝试解析扩展JSON
+                            if ext_json:
+                                try:
+                                    ext_json_obj = json.loads(ext_json)
+                                    msg_args = ext_json_obj.get("msgArgs", {})
+                                    logger.info(f"系统通知参数: {msg_args}")
+                                except Exception as e:
+                                    logger.warning(f"解析extJson失败: {e}")
+                    
+                    logger.info("----------- 系统通知分析结束 -----------")
+                
+                # 检查系统通知的标志
+                is_system_notice = False
+                is_shipping_notice = False
+                
+                # 更详细的系统通知检查 - 消息内容匹配
+                if any(notice in send_message for notice in self.system_notices):
+                    is_system_notice = True
+                    logger.info(f"检测到系统通知: '{send_message}'")
+                
+                # 检查消息中是否存在关键字段，这是系统通知的另一种特征
+                if isinstance(message, dict) and "1" in message and isinstance(message["1"], dict):
+                    if "10" in message["1"] and isinstance(message["1"]["10"], dict):
+                        # 检查reminderContent字段
+                        if "reminderContent" in message["1"]["10"] and message["1"]["10"]["reminderContent"] == "发来一条新消息":
+                            is_system_notice = True
+                            logger.info(f"从消息字段检测到系统通知: reminderContent='发来一条新消息'")
+                        
+                        # 检查消息类型是否为发货相关
+                        if "extJson" in message["1"]["10"]:
+                            try:
+                                ext_json = json.loads(message["1"]["10"]["extJson"])
+                                if "task_id" in ext_json.get("msgArgs", {}):
+                                    # 记录任务ID，可能包含重要信息
+                                    task_id = ext_json["msgArgs"]["task_id"]
+                                    logger.info(f"系统通知任务ID: {task_id}")
+                                    
+                                    # 通过任务ID识别消息类型
+                                    if "taskName" in message["1"]["10"].get("bizTag", ""):
+                                        try:
+                                            biz_tag = json.loads(message["1"]["10"]["bizTag"])
+                                            task_name = biz_tag.get("taskName", "")
+                                            if task_name:
+                                                logger.info(f"系统通知任务名称: {task_name}")
+                                                if any(keyword in task_name for keyword in ["发货", "付款", "订单", "退款"]):
+                                                    is_system_notice = True
+                                                    
+                                                    # 特别标记发货相关通知
+                                                    if "发货" in task_name:
+                                                        is_shipping_notice = True
+                                                        logger.info(f"检测到发货相关系统通知: {task_name}")
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
+                
+                # 临时收集所有可能与发货相关的关键词
+                shipping_keywords = self.shipping_keywords
+                if any(keyword in send_message for keyword in shipping_keywords):
+                    is_shipping_notice = True
+                    is_system_notice = True
+                    logger.info(f"检测到包含发货关键词的消息: '{send_message}'")
+                
+                # 额外检查：消息是否为"发来一条新消息"
+                if send_message == "发来一条新消息":
+                    # 这是一个典型的系统通知而非用户消息
+                    is_system_notice = True
+                    logger.info("检测到系统标准通知: '发来一条新消息'")
+                    
+                    # 检查消息中的其他线索判断是否为发货相关
+                    if isinstance(message, dict) and "1" in message and isinstance(message["1"], dict):
+                        if "10" in message["1"] and isinstance(message["1"]["10"], dict):
+                            reminder_url = message["1"]["10"].get("reminderUrl", "")
+                            if "order_detail" in reminder_url:
+                                is_shipping_notice = True
+                                logger.info("通过URL检测到订单/发货相关通知")
+                
+                # 额外的系统通知去重检查
+                if is_system_notice:
+                    import time
+                    current_time = time.time()
+                    
+                    # 确定消息类型 - 对于系统通知，我们根据其内容分类
+                    message_type = None
+                    for notice in self.system_notices:
+                        if notice in send_message:
+                            message_type = notice
+                            break
+                    
+                    if not message_type:
+                        if is_shipping_notice:
+                            message_type = "发货通知"
+                        else:
+                            message_type = "系统通知"  # 默认类型
+                    
+                    # 对于"发来一条新消息"特殊处理，用item_id和user_id组合作为更精确的标识
+                    if send_message == "发来一条新消息":
+                        unique_key = f"{send_user_id}_{message_type}" 
+                        
+                        # 检查全局缓存是否最近有同类型的系统通知
+                        if hasattr(self, '_last_system_notification'):
+                            last_notif = getattr(self, '_last_system_notification')
+                            if last_notif.get('key') == unique_key:
+                                time_diff = current_time - last_notif.get('time', 0)
+                                if time_diff < 10:  # 特别短的去重窗口(10秒)用于系统通知
+                                    logger.warning(f"极短时间内({time_diff:.1f}秒)收到相同系统通知，忽略此消息: {send_message}")
+                                    self.message_queue.task_done()
+                                    task_completed = True
+                                    continue
+                        
+                        # 更新最近系统通知记录
+                        if not hasattr(self, '_last_system_notification'):
+                            setattr(self, '_last_system_notification', {})
+                        getattr(self, '_last_system_notification').update({
+                            'key': unique_key,
+                            'time': current_time,
+                            'message': send_message
+                        })
+                    
+                    # 检查是否在去重窗口内已经回复过此类型的消息
+                    if send_user_id in self.recent_responses:
+                        user_responses = self.recent_responses[send_user_id]
+                        
+                        # 如果该用户最近收到过此类型系统通知的回复
+                        if message_type in user_responses:
+                            response_info = user_responses[message_type]
+                            time_diff = current_time - response_info["timestamp"]
+                            
+                            # 如果在系统通知去重窗口内且已经回复过相同类型的消息
+                            if time_diff < self.system_notice_window:
+                                # 记录被过滤的消息
+                                logger.info(f"系统通知去重: 已在 {time_diff:.2f} 秒内对用户 {send_user_name} 回复过类似的 '{message_type}' 通知，跳过此消息")
+                                # 递增计数
+                                self.recent_responses[send_user_id][message_type]["count"] += 1
+                                # 跳过本次消息处理
+                                self.message_queue.task_done()
+                                task_completed = True
+                                continue
+                    
+                    # 如果不存在用户记录，创建一个新的
+                    if send_user_id not in self.recent_responses:
+                        self.recent_responses[send_user_id] = {}
                 
                 # 添加用户消息到上下文
                 self.context_manager.add_message(send_user_id, item_id, "user", send_message)
@@ -899,12 +1221,22 @@ class XianyuLive(XianyuWebSocket):
                 # 获取完整的对话上下文
                 context = self.context_manager.get_context(send_user_id, item_id)
                 
-                # 生成回复
-                bot_reply = self.bot.generate_reply(
-                    send_message,
-                    item_description,
-                    context=context
-                )
+                # 对发货相关通知或系统通知使用固定回复
+                if is_shipping_notice:
+                    # 直接使用预设回复
+                    bot_reply = "已为您发货，请注意查收物流信息。如有问题随时联系我哟~"
+                    logger.info(f"发货通知: 使用固定回复: {bot_reply}")
+                elif is_system_notice:
+                    # 对一般系统通知使用简短统一回复
+                    bot_reply = "收到通知，感谢您的支持！如有问题随时联系我哟~"
+                    logger.info(f"系统通知: 使用统一回复: {bot_reply}")
+                else:
+                    # 对普通消息使用模型生成回复
+                    bot_reply = self.bot.generate_reply(
+                        send_message,
+                        item_description,
+                        context=context
+                    )
                 
                 # 检查是否为价格意图
                 if hasattr(self.bot, 'last_intent') and self.bot.last_intent == "price":
@@ -916,6 +1248,35 @@ class XianyuLive(XianyuWebSocket):
                 self.context_manager.add_message(send_user_id, item_id, "assistant", bot_reply)
                 
                 logger.info(f"机器人回复 {send_user_name}: {bot_reply}")
+                
+                # 如果是系统通知，更新最近回复记录
+                if is_system_notice:
+                    import time
+                    current_time = time.time()
+                    message_type = None
+                    for notice in self.system_notices:
+                        if notice in send_message:
+                            message_type = notice
+                            break
+                    
+                    if not message_type:
+                        if is_shipping_notice:
+                            message_type = "发货通知"
+                        else:
+                            message_type = "系统通知"
+                    
+                    # 更新回复记录
+                    self.recent_responses[send_user_id][message_type] = {
+                        "timestamp": current_time,
+                        "count": 1,
+                        "message": send_message[:50]  # 保存消息前50个字符用于日志
+                    }
+                    
+                    # 为发货相关消息设置更长的去重窗口
+                    if is_shipping_notice:
+                        logger.info("设置发货相关通知的去重窗口为2小时")
+                        # 将发货相关消息的去重窗口设为两小时
+                        self.recent_responses[send_user_id][message_type]["extended_window"] = True
                 
                 # 消息ID处理 - 优先从消息中提取带.PNM后缀的消息ID
                 reply_to_message_id = None
@@ -966,8 +1327,9 @@ class XianyuLive(XianyuWebSocket):
             except Exception as e:
                 logger.error(f"处理队列消息时发生错误: {str(e)}")
             finally:
-                # 标记任务完成
-                self.message_queue.task_done()
+                # 标记任务完成 - 只有当之前没有标记过时才调用
+                if not task_completed:
+                    self.message_queue.task_done()
     
     async def handle_live_message(self, message_data, websocket):
         """
@@ -1077,3 +1439,32 @@ class XianyuLive(XianyuWebSocket):
     async def main(self):
         """启动闲鱼直播连接主函数"""
         await self.run() 
+
+    def _clean_message_fingerprints_worker(self):
+        """定期清理过期的消息指纹缓存"""
+        import time
+        
+        while True:
+            try:
+                # 每2分钟清理一次
+                time.sleep(120)
+                
+                # 清理过期的缓存
+                current_time = time.time()
+                expired_fingerprints = []
+                
+                for fingerprint, timestamp in self.processed_messages.items():
+                    if current_time - timestamp > self.processed_window * 3:  # 使用3倍的处理窗口作为过期时间
+                        expired_fingerprints.append(fingerprint)
+                
+                # 删除过期的指纹
+                for fingerprint in expired_fingerprints:
+                    del self.processed_messages[fingerprint]
+                
+                if expired_fingerprints:
+                    logger.debug(f"已清理 {len(expired_fingerprints)} 个过期消息指纹，当前缓存大小: {len(self.processed_messages)}")
+                    
+            except Exception as e:
+                logger.error(f"清理消息指纹缓存时出错: {e}")
+                # 异常后等待30秒再继续
+                time.sleep(30) 
