@@ -1,0 +1,10 @@
+openai==1.65.5
+websockets==13.1
+loguru==0.7.3
+python-dotenv==1.0.1
+requests==2.32.3
+pyexecjs==1.5.1
+fastapi==0.112.3
+uvicorn==0.29.0
+pydantic==2.6.3
+playwright==1.44.0 

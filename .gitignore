@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+venv/
+.env
+.venv
+ENV/
+env/
+.venv/
+bin/
+include/
+lib/
+lib64/
+pyvenv.cfg
+pip-selfcheck.json
+
+# 日志文件
+*.log
+logs/
+
+# 环境配置
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# 临时文件
+tmp/
+temp/
+.tmp/
+.temp/
+
+# 其他
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json 
