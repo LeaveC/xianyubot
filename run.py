@@ -12,7 +12,7 @@ src_dir = os.path.join(current_dir, "src")
 sys.path.insert(0, src_dir)
 
 # 导入主模块
-from main import main
+from src.main import main
 import asyncio
 
 if __name__ == "__main__":

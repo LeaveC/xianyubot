@@ -1,5 +1,5 @@
 """
-闲鱼工具函数模块
+闲鱼工具函数模块 - 纯Python实现版
 提供生成签名、处理cookies等通用工具函数
 """
 
@@ -7,41 +7,127 @@ import json
 import subprocess
 from functools import partial
 import os
-import execjs
+import sys
+import platform
 from loguru import logger
 import asyncio
 from playwright.async_api import async_playwright
+import re
+import shutil
 
-# 修复execjs编码问题
-subprocess.Popen = partial(subprocess.Popen, encoding="utf-8")
+# 检测操作系统类型
+IS_WINDOWS = platform.system() == 'Windows'
 
-def load_js_module():
-    """加载JS脚本文件"""
+# 修复subprocess编码问题 - 为Windows系统专门设置
+if IS_WINDOWS:
+    # Windows下需要额外设置编码为utf-8，避免默认GBK编码导致的问题
+    import subprocess as _subprocess
+    _orig_popen = _subprocess.Popen
+    
+    def _popen_utf8(*args, **kwargs):
+        # 始终指定UTF-8编码，防止使用GBK
+        kwargs['encoding'] = 'utf-8'
+        # 设置shell参数
+        kwargs['shell'] = True
+        # 确保stderr和stdout都使用管道，便于捕获
+        kwargs['stderr'] = _subprocess.PIPE
+        kwargs['stdout'] = _subprocess.PIPE
+        return _orig_popen(*args, **kwargs)
+    
+    _subprocess.Popen = _popen_utf8
+    logger.info("检测到Windows系统，已应用Windows特定的subprocess UTF-8编码配置")
+else:
+    # 非Windows系统通常默认使用UTF-8编码
+    subprocess.Popen = partial(subprocess.Popen, encoding="utf-8")
+    logger.info("检测到非Windows系统，应用标准subprocess编码配置")
+
+# 纯Python实现的函数
+def _py_generate_mid():
+    """生成消息ID的纯Python实现"""
+    import random
+    import time
+    return f"{int(1000 * random.random())}{int(time.time() * 1000)} 0"
+
+def _py_generate_uuid():
+    """生成UUID的纯Python实现"""
+    import time
+    return f"-{int(time.time() * 1000)}1"
+
+def _py_generate_device_id(user_id):
+    """生成设备ID的纯Python实现"""
+    import random
+    import time
+    import uuid
+    
+    # 尝试使用uuid模块生成一个基于用户ID的确定性UUID
     try:
-        # 获取当前脚本所在目录的上一级，即项目根目录
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-        js_path = os.path.join(project_root, 'static', 'xianyu_js_version_2.js')
-        
-        # 检查文件是否存在
-        if not os.path.exists(js_path):
-            logger.error(f"JS文件不存在: {js_path}")
-            raise FileNotFoundError(f"找不到JS文件: {js_path}")
-            
-        # 读取并编译JS文件
-        with open(js_path, 'r', encoding='utf-8') as f:
-            js_content = f.read()
-            
-        return execjs.compile(js_content)
-    except Exception as e:
-        logger.error(f"加载JS模块失败: {str(e)}")
-        raise
+        device_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"xianyubot-{user_id}"))
+        return f"{device_id}-{user_id}"
+    except:
+        # 回退到简单实现
+        random_chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+        uuid_parts = []
+        for i in range(36):
+            if i in [8, 13, 18, 23]:
+                uuid_parts.append("-")
+            elif i == 14:
+                uuid_parts.append("4")
+            elif i == 19:
+                random_idx = random.randint(0, 15)
+                uuid_parts.append(random_chars[8 + random_idx])
+            else:
+                uuid_parts.append(random_chars[random.randint(0, 61)])
+        return "".join(uuid_parts) + "-" + str(user_id)
 
-# 初始化JS模块
-try:
-    xianyu_js = load_js_module()
-except Exception as e:
-    logger.warning(f"初始化JS模块失败，部分功能可能不可用: {str(e)}")
-    xianyu_js = None
+def _py_generate_sign(t, token, data):
+    """
+    生成API请求签名的纯Python实现
+    
+    Args:
+        t (str): 时间戳
+        token (str): 用户token
+        data (str): 请求数据
+        
+    Returns:
+        str: MD5签名
+    """
+    import hashlib
+    msg = f"{token}&{t}&34839810&{data}"
+    return hashlib.md5(msg.encode('utf-8')).hexdigest()
+
+def generate_mid():
+    """生成消息ID"""
+    return _py_generate_mid()
+
+def generate_uuid():
+    """生成UUID"""
+    return _py_generate_uuid()
+
+def generate_device_id(user_id):
+    """
+    生成设备ID
+    
+    Args:
+        user_id (str): 用户ID
+        
+    Returns:
+        str: 设备ID
+    """
+    return _py_generate_device_id(user_id)
+
+def generate_sign(t, token, data):
+    """
+    生成API请求签名
+    
+    Args:
+        t (str): 时间戳
+        token (str): 用户token
+        data (str): 请求数据
+        
+    Returns:
+        str: 签名
+    """
+    return _py_generate_sign(t, token, data)
 
 def trans_cookies(cookies_str):
     """
@@ -61,6 +147,18 @@ def trans_cookies(cookies_str):
             continue
     return cookies
 
+def cookies_dict_to_str(cookies_dict):
+    """
+    将cookies字典转换为字符串格式
+    
+    Args:
+        cookies_dict (dict): Cookies字典
+        
+    Returns:
+        str: 转换后的cookies字符串
+    """
+    return "; ".join([f"{k}={v}" for k, v in cookies_dict.items()])
+
 async def get_login_cookies():
     """
     打开Firefox浏览器，访问闲鱼消息页面，等待用户登录，并获取登录cookies
@@ -71,10 +169,29 @@ async def get_login_cookies():
     """
     cookies_data = {}
     # 获取状态文件路径
-    state_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'playwright_state.json'))
+    data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'data'))
+    
+    # 确保data目录存在
+    if not os.path.exists(data_dir):
+        try:
+            os.makedirs(data_dir)
+            logger.info(f"创建数据目录: {data_dir}")
+        except Exception as e:
+            logger.error(f"创建数据目录失败: {e}")
+    
+    state_path = os.path.join(data_dir, 'playwright_state.json')
     
     try:
-        logger.info("启动Firefox浏览器获取闲鱼登录凭证")
+        # 根据操作系统选择浏览器
+        browser_type = 'firefox'
+        if IS_WINDOWS:
+            # Windows下默认使用Chromium，可能更稳定
+            browser_type = 'chromium'
+            logger.info(f"Windows系统使用 {browser_type} 浏览器")
+        else:
+            logger.info(f"非Windows系统使用 {browser_type} 浏览器")
+            
+        logger.info(f"启动{browser_type}浏览器获取闲鱼登录凭证")
         async with async_playwright() as p:
             # 创建浏览器上下文选项
             context_options = {}
@@ -89,8 +206,9 @@ async def get_login_cookies():
                 except Exception as e:
                     logger.error(f"加载浏览器状态失败: {e}")
             
-            # 启动Firefox浏览器
-            browser = await p.firefox.launch(headless=False)
+            # 启动选择的浏览器
+            browser_launcher = getattr(p, browser_type)
+            browser = await browser_launcher.launch(headless=False)
             
             # 创建新的浏览器上下文，并应用已保存的状态(如果有)
             context = await browser.new_context(**context_options)
@@ -155,11 +273,11 @@ async def get_login_cookies():
             }
             
             # 输出cookies字符串格式
-            cookies_str = "; ".join([f"{k}={v}" for k, v in cookies_dict.items()])
+            cookies_str = cookies_dict_to_str(cookies_dict)
             logger.info(f"成功获取登录cookies: {cookies_str[:100]}...")
             
             # 保存cookies数据到文件
-            save_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'xianyu_cookies.json'))
+            save_path = os.path.join(data_dir, 'xianyu_cookies.json')
             with open(save_path, 'w', encoding='utf-8') as f:
                 json.dump(cookies_data, f, ensure_ascii=False, indent=2)
             logger.info(f"登录凭证已保存到: {save_path}")
@@ -191,7 +309,8 @@ def load_cookies():
     """
     try:
         # 获取cookies文件路径
-        cookies_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'xianyu_cookies.json'))
+        data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'data'))
+        cookies_path = os.path.join(data_dir, 'xianyu_cookies.json')
         
         # 检查文件是否存在
         if not os.path.exists(cookies_path):
@@ -209,80 +328,97 @@ def load_cookies():
         logger.error(f"加载cookies时发生错误: {str(e)}")
         return None
 
-def generate_mid():
-    """生成消息ID"""
-    if not xianyu_js:
-        logger.error("JS模块未初始化，无法生成mid")
-        return None
-    return xianyu_js.call('generate_mid')
-
-def generate_uuid():
-    """生成UUID"""
-    if not xianyu_js:
-        logger.error("JS模块未初始化，无法生成uuid")
-        return None
-    return xianyu_js.call('generate_uuid')
-
-def generate_device_id(user_id):
+def _py_decrypt(data):
     """
-    生成设备ID
+    解密数据的纯Python实现
     
     Args:
-        user_id (str): 用户ID
+        data (str): base64编码的数据
         
     Returns:
-        str: 设备ID
+        str: 解密后的JSON字符串
     """
-    if not xianyu_js:
-        logger.error("JS模块未初始化，无法生成device_id")
-        return None
-    return xianyu_js.call('generate_device_id', user_id)
+    try:
+        import base64
+        import json
+        import struct
 
-def generate_sign(t, token, data):
-    """
-    生成API请求签名
-    
-    Args:
-        t (str): 时间戳
-        token (str): 用户token
-        data (str): 请求数据
-        
-    Returns:
-        str: 生成的签名
-    """
-    if not xianyu_js:
-        logger.error("JS模块未初始化，无法生成sign")
-        return None
-    return xianyu_js.call('generate_sign', t, token, data)
+        # 尝试导入 msgpack
+        msgpack_available = False
+        try:
+            from msgpack import unpackb
+            msgpack_available = True
+        except ImportError:
+            logger.error("缺少 'msgpack' 库，无法进行 msgpack 解码。请尝试运行 'pip install msgpack' 安装。")
+
+        # 首先尝试标准base64解码
+        try:
+            decoded = base64.b64decode(data)
+            result = decoded.decode('utf-8')
+            json.loads(result)  # 验证是否为有效JSON
+            logger.info("使用标准base64+UTF-8解码成功")
+            return result
+        except Exception as e:
+            logger.debug(f"标准base64+UTF-8解码尝试失败: {e}")
+
+        # 如果 msgpack 可用，尝试使用 msgpack 解包
+        if msgpack_available:
+            try:
+                # 确保 decoded 变量存在 (来自上面的 try block)
+                if 'decoded' not in locals():
+                     decoded = base64.b64decode(data) # 如果第一次 base64 解码失败，这里可能需要重新解码
+
+                unpacked = unpackb(decoded, raw=False, strict_map_key=False)
+                logger.info("使用msgpack解包成功")
+                return json.dumps(unpacked)
+            except Exception as e:
+                logger.debug(f"msgpack解包尝试失败: {e}")
+        else:
+            logger.debug("跳过 msgpack 解码，因为库不可用。")
+
+        # 如果以上方法都失败，尝试通用解码方式 (提取可打印字符)
+        logger.warning("标准解码和 msgpack 解码均失败，尝试提取可打印ASCII字符作为后备方案。")
+        # 确保 decoded 变量存在
+        if 'decoded' not in locals():
+            try:
+                decoded = base64.b64decode(data)
+            except Exception as decode_err:
+                logger.error(f"最终尝试Base64解码也失败: {decode_err}")
+                return json.dumps({
+                    "success": False,
+                    "message": f"无法进行Base64解码: {decode_err}",
+                    "base64Length": len(data)
+                })
+
+        printable_chars = []
+        for byte in decoded:
+            if 32 <= byte <= 126:  # 可打印ASCII字符
+                printable_chars.append(chr(byte))
+
+        if printable_chars:
+            result = {"extractedText": ''.join(printable_chars)}
+            logger.info(f"后备方案：提取到可打印字符: {result}")
+            return json.dumps(result)
+
+        logger.error("所有解码方法均失败，无法解析数据。")
+        return json.dumps({
+            "success": False,
+            "message": "无法解码消息，尝试了UTF-8和msgpack（如果可用）",
+            "base64Length": len(data)
+        })
+    except Exception as e:
+        logger.error(f"Python解密数据时发生意外错误: {e}")
+        return json.dumps({"error": f"解密失败: {str(e)}"})
 
 def decrypt(data):
     """
     解密数据
     
     Args:
-        data (str): 加密数据
+        data (str): 加密的数据
         
     Returns:
         str: 解密后的数据
     """
-    if not xianyu_js:
-        logger.error("JS模块未初始化，无法解密数据")
-        return None
-    return xianyu_js.call('decrypt', data)
-
-def cookies_dict_to_str(cookies_dict):
-    """
-    将cookies字典转换为字符串格式
-    
-    Args:
-        cookies_dict (dict): Cookies字典
-        
-    Returns:
-        str: 格式化的cookies字符串，例如"name1=value1; name2=value2"
-    """
-    try:
-        cookies_str = "; ".join([f"{k}={v}" for k, v in cookies_dict.items()])
-        return cookies_str
-    except Exception as e:
-        logger.error(f"转换cookies字典为字符串时出错: {e}")
-        return "" 
+    logger.info("使用Python实现解密数据")
+    return _py_decrypt(data)

@@ -1,5 +1,6 @@
 import asyncio
 import os
+import platform
 import argparse
 from loguru import logger
 from dotenv import load_dotenv
@@ -7,7 +8,10 @@ from dotenv import load_dotenv
 from api.xianyu_websocket import XianyuLive
 from agents.expert_agents import XianyuReplyBot
 from core.context_manager import ChatContextManager
-from utils.xianyu_utils import get_login_cookies, load_cookies, trans_cookies
+from utils.xianyu_utils import get_login_cookies, load_cookies, trans_cookies, cookies_dict_to_str
+
+# 检测操作系统类型
+IS_WINDOWS = platform.system() == 'Windows'
 
 async def main():
     # 解析命令行参数
@@ -33,7 +37,7 @@ async def main():
     
     if cookies_data and "cookies" in cookies_data:
         cookies_dict = cookies_data["cookies"]
-        cookies_str = "; ".join([f"{k}={v}" for k, v in cookies_dict.items()])
+        cookies_str = cookies_dict_to_str(cookies_dict)
         logger.info("成功从文件加载登录凭证")
     
     # 如果没有有效的cookies，自动打开浏览器获取
@@ -45,7 +49,7 @@ async def main():
             return
         
         cookies_dict = cookies_data["cookies"]
-        cookies_str = "; ".join([f"{k}={v}" for k, v in cookies_dict.items()])
+        cookies_str = cookies_dict_to_str(cookies_dict)
         logger.info("成功获取新的登录凭证")
     
     # 初始化回复机器人
@@ -59,6 +63,13 @@ async def main():
 
 if __name__ == "__main__":
     try:
+        # 在Windows上设置默认事件循环策略，解决asyncio兼容性问题
+        if IS_WINDOWS:
+            # Windows平台使用SelectorEventLoop避免ProactorEventLoop的问题
+            # 解决Windows上常见的"Event loop is closed"错误
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+            logger.info("Windows平台: 设置了WindowsSelectorEventLoopPolicy")
+            
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("程序被用户中断")

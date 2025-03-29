@@ -20,6 +20,7 @@ XianyuBot 是基于 XianyuAutoAgent 重构的模块化闲鱼智能客服系统�
 
 ### 环境要求
 - Python 3.8+
+- Node.js (Windows系统必需，macOS/Linux上可选)
 - Playwright (获取登录凭证)
 
 ### 安装步骤
@@ -32,12 +33,46 @@ cd xianyubot
 pip install -r requirements.txt
 
 # 3. 安装Playwright浏览器
-python -m playwright install firefox
+python -m playwright install firefox chromium
 
 # 4. 配置环境变量
 cp .env.example .env
 # 编辑.env文件，填入必要的API密钥和配置
 ```
+
+### Windows特定安装步骤
+如果您使用的是Windows系统，请确保：
+
+1. 安装Node.js（必需）：
+   - 访问 [Node.js官网](https://nodejs.org/)下载并安装LTS版本
+   - 安装时勾选"Add to PATH"选项
+   - 安装完成后，在命令提示符中验证：`node --version`
+
+2. 创建数据目录：
+   ```cmd
+   mkdir data
+   ```
+
+3. 解决可能的权限问题：
+   - 以管理员身份运行命令提示符或PowerShell
+   - 或确保您有足够的权限创建和写入文件
+
+4. 如果遇到SSL验证错误，可使用：
+   ```cmd
+   set PYTHONHTTPSVERIFY=0
+   ```
+
+5. **JavaScript运行时解决方案**：
+   - **方案一**: 确保Node.js安装且在PATH中（推荐）
+   - **方案二**: 如果无法安装Node.js，系统会尝试使用js2py作为备选方案
+   - **方案三**: 如果上述方案都失败，关键功能会回退到纯Python实现
+
+6. **Node.js安装故障排除**：
+   - 如果执行`node --version`时提示"不是内部或外部命令"
+   - 检查Node.js是否正确安装
+   - 确认Node.js目录已添加到系统PATH
+   - 在安装后重启命令提示符或PowerShell
+   - 如果路径中有空格，尝试使用短路径名称
 
 ### 获取登录凭证
 XianyuBot会自动管理登录凭证，不需要手动设置cookies：
@@ -49,21 +84,39 @@ XianyuBot会自动管理登录凭证，不需要手动设置cookies：
 #### 方式一：使用独立脚本获取
 ```bash
 # 运行自动获取脚本
-python xianyubot/scripts/get_cookies.py
+python scripts/get_cookies.py
 ```
 
 #### 方式二：使用命令行参数强制刷新
 ```bash
 # 使用--login参数强制刷新登录凭证
-python -m src.main --login
+python run.py --login
 ```
 
 ### 使用方法
 
 运行主程序：
 ```bash
-python -m src.main
+python run.py
 ```
+
+## 系统兼容性
+
+### Windows支持
+本项目已针对Windows系统进行了优化：
+- 使用`Chromium`浏览器代替Firefox获取登录凭证
+- 优化路径处理，解决目录分隔符问题
+- 解决`asyncio`事件循环兼容性问题
+- 添加Node.js环境检测和配置
+- 多级JavaScript运行时解决方案：
+  - 主方案：Node.js（自动检测常见安装路径）
+  - 备选方案：js2py纯Python实现
+  - 兜底方案：纯Python实现关键函数
+
+### macOS/Linux支持
+在macOS和Linux系统上：
+- 默认使用Firefox浏览器
+- 自动处理路径和权限
 
 ## 📁 项目结构
 

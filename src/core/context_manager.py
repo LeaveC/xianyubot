@@ -35,7 +35,19 @@ class ChatContextManager:
         # 确保数据库目录存在
         db_dir = os.path.dirname(self.db_path)
         if db_dir and not os.path.exists(db_dir):
-            os.makedirs(db_dir)
+            try:
+                os.makedirs(db_dir, exist_ok=True)
+                logger.info(f"创建数据库目录: {db_dir}")
+            except Exception as e:
+                logger.error(f"创建数据库目录失败: {e}")
+                # 尝试使用绝对路径
+                self.db_path = os.path.abspath(os.path.join(os.getcwd(), 'data', 'chat_history.db'))
+                logger.info(f"尝试使用备用数据库路径: {self.db_path}")
+                
+                # 再次确保目录存在
+                db_dir = os.path.dirname(self.db_path)
+                if not os.path.exists(db_dir):
+                    os.makedirs(db_dir, exist_ok=True)
             
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
