@@ -159,10 +159,13 @@ def cookies_dict_to_str(cookies_dict):
     """
     return "; ".join([f"{k}={v}" for k, v in cookies_dict.items()])
 
-async def get_login_cookies():
+async def get_login_cookies(force_login=False):
     """
-    打开Firefox浏览器，访问闲鱼消息页面，等待用户登录，并获取登录cookies
+    打开Firefox或Chrome浏览器，访问闲鱼消息页面，等待用户登录，并获取登录cookies
     如果存在已保存的浏览器状态，将尝试恢复该状态
+    
+    Args:
+        force_login (bool): 是否强制用户重新登录，忽略已保存的状态
     
     Returns:
         dict: 包含cookies和localStorage的字典
@@ -181,6 +184,14 @@ async def get_login_cookies():
     
     state_path = os.path.join(data_dir, 'playwright_state.json')
     
+    # 如果是强制登录模式，且状态文件存在，则删除它
+    if force_login and os.path.exists(state_path):
+        try:
+            os.remove(state_path)
+            logger.info("已删除浏览器状态文件，将使用强制登录模式")
+        except Exception as e:
+            logger.error(f"删除浏览器状态文件失败: {e}")
+    
     try:
         # 根据操作系统选择浏览器
         browser_type = 'firefox'
@@ -190,14 +201,25 @@ async def get_login_cookies():
             logger.info(f"Windows系统使用 {browser_type} 浏览器")
         else:
             logger.info(f"非Windows系统使用 {browser_type} 浏览器")
-            
-        logger.info(f"启动{browser_type}浏览器获取闲鱼登录凭证")
+        
+        # 打印登录模式提示
+        if force_login:
+            logger.info("======== 闲鱼强制登录流程 ========")
+            logger.info("系统将打开全新浏览器进行登录，忽略已保存的状态")
+        else:
+            logger.info("======== 闲鱼登录流程 ========")
+        
+        logger.info(f"正在启动{browser_type}浏览器获取闲鱼登录凭证")
+        logger.info("请注意：将会打开浏览器窗口，请在窗口中完成登录")
+        logger.info("登录成功后，浏览器会自动关闭并继续运行程序")
+        logger.info("=============================")
+        
         async with async_playwright() as p:
             # 创建浏览器上下文选项
             context_options = {}
             
-            # 检查是否存在已保存的状态
-            if os.path.exists(state_path):
+            # 检查是否存在已保存的状态且不是强制登录模式
+            if os.path.exists(state_path) and not force_login:
                 logger.info("找到已保存的浏览器状态，尝试恢复...")
                 try:
                     with open(state_path, 'r', encoding='utf-8') as f:
@@ -205,6 +227,8 @@ async def get_login_cookies():
                     context_options["storage_state"] = storage_state
                 except Exception as e:
                     logger.error(f"加载浏览器状态失败: {e}")
+            elif force_login:
+                logger.info("使用强制登录模式，不恢复已保存的状态")
             
             # 启动选择的浏览器
             browser_launcher = getattr(p, browser_type)
@@ -233,8 +257,13 @@ async def get_login_cookies():
             
             # 如果没有登录，则等待用户手动登录
             if not already_logged_in:
+                logger.info("============ 需要登录 ============")
                 logger.info("未检测到登录状态，请在打开的浏览器中手动登录闲鱼")
-                logger.info("等待检测到登录状态...")
+                logger.info("1. 请点击登录/扫码登录按钮")
+                logger.info("2. 使用淘宝/支付宝APP扫码或其他方式登录")
+                logger.info("3. 登录成功后系统会自动继续")
+                logger.info("4. 如超过5分钟未登录会自动取消")
+                logger.info("==================================")
                 
                 # 等待登录成功的标识
                 login_success = False
@@ -248,19 +277,69 @@ async def get_login_cookies():
                     # 检查是否有登录成功的标识cookies
                     if any(cookie["name"] == "havana_lgc2_77" for cookie in cookies):
                         login_success = True
+                        logger.info("============= 登录成功 =============")
+                        logger.info("已检测到成功登录，正在保存登录凭证...")
                         break
+                    
+                    # 每10秒提醒一次
+                    elapsed = asyncio.get_event_loop().time() - start_time
+                    if int(elapsed) % 10 == 0:
+                        remaining = max_wait_time - elapsed
+                        logger.info(f"等待登录中... 剩余时间: {int(remaining)}秒")
                     
                     # 等待2秒后再次检查
                     await asyncio.sleep(2)
                 
                 if not login_success:
-                    logger.warning("等待登录超时，可能未成功登录")
+                    logger.warning("============ 登录超时 ============")
+                    logger.warning("等待登录超时(5分钟)，未能成功登录闲鱼")
+                    logger.warning("请检查网络连接或稍后再试")
+                    logger.warning("=================================")
                     await browser.close()
                     return None
+            
+            # 无论是否已登录，都执行刷新页面操作以确保获取完整cookies
+            logger.info("正在刷新页面以确保获取完整cookies...")
+            
+
+            
+            # 然后再访问闲鱼消息页面
+            await page.goto("https://www.goofish.com/im")
+            logger.info("已重新加载闲鱼消息页面")
+            await asyncio.sleep(2)  # 等待页面加载完成
+            
             
             # 获取cookies和localStorage
             cookies = await context.cookies()
             cookies_dict = {cookie["name"]: cookie["value"] for cookie in cookies}
+            
+            # 输出cookies字符串格式
+            cookies_str = cookies_dict_to_str(cookies_dict)
+            logger.info(f"成功获取登录cookies: {cookies_str[:50]}...")
+            
+            # 检查关键cookie是否存在
+            essential_cookies = ["_m_h5_tk", "_m_h5_tk_enc", "unb", "havana_lgc2_77"]
+            missing_cookies = [cookie for cookie in essential_cookies if cookie not in cookies_dict]
+            if missing_cookies:
+                logger.warning(f"警告：缺少重要的cookies: {', '.join(missing_cookies)}")
+                logger.warning("这可能会导致连接不稳定或认证失败")
+                
+                # 尝试访问其他页面获取所需cookie
+                if "_m_h5_tk" in missing_cookies or "_m_h5_tk_enc" in missing_cookies:
+                    logger.info("尝试访问淘宝主页获取缺失的token cookies...")
+                    await page.goto("https://www.taobao.com")
+                    await asyncio.sleep(3)
+                    
+                    # 再次获取cookies
+                    cookies = await context.cookies()
+                    cookies_dict = {cookie["name"]: cookie["value"] for cookie in cookies}
+                    
+                    # 重新检查是否还有缺失的cookies
+                    missing_cookies = [cookie for cookie in essential_cookies if cookie not in cookies_dict]
+                    if missing_cookies:
+                        logger.warning(f"尝试后仍缺少的cookies: {', '.join(missing_cookies)}")
+                    else:
+                        logger.info("成功获取到所有必要的cookies!")
             
             # 获取localStorage数据
             local_storage = await page.evaluate("() => JSON.stringify(localStorage)")
@@ -271,10 +350,6 @@ async def get_login_cookies():
                 "cookies": cookies_dict,
                 "localStorage": local_storage_dict
             }
-            
-            # 输出cookies字符串格式
-            cookies_str = cookies_dict_to_str(cookies_dict)
-            logger.info(f"成功获取登录cookies: {cookies_str[:100]}...")
             
             # 保存cookies数据到文件
             save_path = os.path.join(data_dir, 'xianyu_cookies.json')
@@ -293,9 +368,11 @@ async def get_login_cookies():
             
             # 关闭浏览器
             await browser.close()
+            logger.info("浏览器已关闭，登录流程完成")
             
     except Exception as e:
         logger.error(f"获取登录cookies时发生错误: {str(e)}")
+        logger.exception("登录过程异常详情")
         return None
     
     return cookies_data

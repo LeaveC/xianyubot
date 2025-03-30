@@ -6,6 +6,7 @@
 from typing import Dict, List, Any, Optional
 import re
 from loguru import logger
+import os
 
 from .base import BaseAgent
 
@@ -33,11 +34,14 @@ class PriceAgent(BaseAgent):
         messages = self._build_messages(user_msg, item_desc, context)
         messages[0]['content'] += f"\n▲当前议价轮次：{bargain_count}"
         
+        # 获取环境变量中的模型设置
+        model = os.getenv("LLM_MODEL", "gpt-4-turbo")
+        
         # 调用LLM生成回复
         def _execute_llm_call():
             try:
                 response = self.client.chat.completions.create(
-                    model="qwen-max",
+                    model=model,
                     messages=messages,
                     temperature=dynamic_temp,  # 动态温度
                     max_tokens=500,
@@ -66,7 +70,7 @@ class PriceAgent(BaseAgent):
             float: 计算后的温度参数
         """
         # 议价次数越多，温度越高，回复越多样化
-        base_temp = 0.3
+        base_temp = float(os.getenv("LLM_TEMPERATURE", "0.7"))
         increment = min(bargain_count * 0.1, 0.5)  # 最大增加0.5
         return base_temp + increment
 
@@ -90,13 +94,17 @@ class TechAgent(BaseAgent):
         # 构建消息，技术性回复使用较低温度
         messages = self._build_messages(user_msg, item_desc, context)
         
+        # 获取环境变量中的模型设置
+        model = os.getenv("LLM_MODEL", "gpt-4-turbo")
+        temp = float(os.getenv("LLM_TEMPERATURE", "0.7")) * 0.3  # 技术回复使用较低温度
+        
         # 技术回复使用较低的温度，确保一致性和准确性
         def _execute_llm_call():
             try:
                 response = self.client.chat.completions.create(
-                    model="qwen-max",
+                    model=model,
                     messages=messages,
-                    temperature=0.2,  # 低温度，更确定性的回答
+                    temperature=temp,  # 低温度，更确定性的回答
                     max_tokens=800,  # 技术回复可能需要更长的内容
                     top_p=0.8
                 )
@@ -134,11 +142,14 @@ class ClassifyAgent(BaseAgent):
             {"role": "user", "content": user_msg}
         ]
         
+        # 获取环境变量中的轻量级模型设置（分类任务使用轻量级模型以节省成本）
+        model = os.getenv("LLM_MODEL_LIGHT", "gpt-3.5-turbo")
+        
         # 调用LLM进行分类
         def _execute_llm_call():
             try:
                 response = self.client.chat.completions.create(
-                    model="qwen-max",
+                    model=model,
                     messages=messages,
                     temperature=0.1,  # 很低的温度，确保一致性
                     max_tokens=10,  # 分类只需要很短的输出
@@ -179,13 +190,17 @@ class DefaultAgent(BaseAgent):
         Returns:
             str: 生成的文本
         """
+        # 获取环境变量中的模型设置
+        model = os.getenv("LLM_MODEL", "gpt-4-turbo")
+        temp = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+        
         # 定义执行函数
         def _execute_llm_call():
             try:
                 response = self.client.chat.completions.create(
-                    model="qwen-max",
+                    model=model,
                     messages=messages,
-                    temperature=0.7,  # 默认回复使用较高温度，增加多样性
+                    temperature=temp,
                     max_tokens=400,
                     top_p=0.9
                 )
@@ -320,10 +335,14 @@ class XianyuReplyBot:
         # 调用模型生成回复
         def _execute_llm_call():
             try:
+                # 获取环境变量中的模型设置
+                model = os.getenv("LLM_MODEL", "gpt-4-turbo")
+                base_temp = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+                
                 response = self.agent.client.chat.completions.create(
-                    model="qwen-max",
+                    model=model,
                     messages=messages,
-                    temperature=0.4 + min(bargain_count * 0.05, 0.3),  # 随议价次数略微增加温度
+                    temperature=base_temp * 0.6 + min(bargain_count * 0.05, 0.3),  # 随议价次数略微增加温度
                     max_tokens=500,
                     top_p=0.8
                 )

@@ -13,6 +13,7 @@ from loguru import logger
 import concurrent.futures
 from queue import Queue
 from threading import Thread
+import os
 
 from utils.xianyu_utils import generate_mid, generate_uuid, trans_cookies, generate_device_id, decrypt, get_login_cookies, cookies_dict_to_str
 from utils.xianyu_apis import XianyuApis
@@ -79,12 +80,27 @@ class XianyuWebSocket:
         try:
             xianyu_apis = XianyuApis()
             token_info = xianyu_apis.get_token(self.cookies, self.device_id)
-            if not token_info or 'data' not in token_info or 'accessToken' not in token_info['data']:
-                logger.error(f"获取token失败: {token_info}")
-                error_message = f"获取token失败: {token_info}"
-                raise ValueError(error_message)
+            
+            # 首先检查是否有accessToken，有则代表成功
+            if token_info and 'data' in token_info and 'accessToken' in token_info['data']:
+                token = token_info['data']['accessToken']
+                logger.info("成功获取token，准备初始化连接")
+            else:
+                # 检查是否返回错误信息
+                error_message = "获取token失败: 未知错误"
+                if "ret" in token_info and isinstance(token_info["ret"], list) and len(token_info["ret"]) > 0:
+                    error_msg = token_info["ret"][0]
+                    logger.error(f"获取token失败: {error_msg}")
+                    
+                    # 检查是否是令牌过期或为空的错误
+                    if "令牌过期" in error_msg or "TOKEN_EMPTY" in error_msg or "TOKEN_EXPIRED" in error_msg:
+                        error_message = f"获取token失败: {token_info} ::令牌过期"
+                    else:
+                        error_message = f"获取token失败: {token_info}"
                 
-            token = token_info['data']['accessToken']
+                # 如果没有token，则抛出异常
+                logger.error(f"获取token失败，返回数据格式不正确或无token: {token_info}")
+                raise ValueError(error_message)
             
             msg = {
                 "lwp": "/reg",
@@ -761,6 +777,14 @@ class XianyuWebSocket:
         """
         建立WebSocket连接并处理消息
         """
+        # 记录token获取失败次数
+        token_failure_count = 0
+        max_token_failures = 3  # 最大允许的连续失败次数
+        
+        # 记录WebSocket连接失败次数
+        ws_connection_attempts = 0
+        max_ws_connection_attempts = 3  # 最大WebSocket重连尝试次数
+        
         try:
             # 设置WebSocket连接的headers
             headers = {
@@ -776,80 +800,89 @@ class XianyuWebSocket:
             }
             
             logger.info("正在连接到闲鱼WebSocket服务器...")
-            async with websockets.connect(self.base_url, extra_headers=headers) as ws:
-                self.ws = ws
-                logger.info("WebSocket连接已建立")
+            try:
+                # 增加WebSocket连接尝试次数
+                ws_connection_attempts += 1
                 
-                # 初始化连接
-                await self.init(ws)
-                
-                # 初始化心跳时间
-                self.last_heartbeat_time = time.time()
-                self.last_heartbeat_response = time.time()
-                
-                # 启动心跳任务
-                self.heartbeat_task = asyncio.create_task(self.heartbeat_loop(ws))
-                
-                # 使用与原始项目相同的消息处理循环
-                async for message in ws:
+                async with websockets.connect(self.base_url, extra_headers=headers) as ws:
+                    self.ws = ws
+                    logger.info("WebSocket连接已建立")
+                    
+                    # 初始化连接
                     try:
-                        message_data = json.loads(message)
-                        
-                        # 处理心跳响应
-                        if await self.handle_heartbeat_response(message_data):
-                            continue
-                        
-                        # 处理其他消息
-                        await self.handle_message(message_data, ws)
+                        await self.init(ws)
+                        # 如果成功，重置失败计数
+                        token_failure_count = 0
+                        ws_connection_attempts = 0  # 重置WebSocket连接尝试次数
+                    except ValueError as e:
+                        # 如果是token错误，增加失败计数
+                        if "令牌过期" in str(e) or "令牌为空" in str(e):
+                            token_failure_count += 1
+                            logger.warning(f"token获取失败次数: {token_failure_count}/{max_token_failures}")
+                        raise  # 继续抛出异常，让外层处理
+                    
+                    # 初始化心跳时间
+                    self.last_heartbeat_time = time.time()
+                    self.last_heartbeat_response = time.time()
+                    
+                    # 启动心跳任务
+                    self.heartbeat_task = asyncio.create_task(self.heartbeat_loop(ws))
+                    
+                    # 使用与原始项目相同的消息处理循环
+                    async for message in ws:
+                        try:
+                            message_data = json.loads(message)
                             
-                    except json.JSONDecodeError:
-                        logger.error("消息解析失败")
-                    except Exception as e:
-                        logger.error(f"处理消息时发生错误: {str(e)}")
-                        logger.debug(f"原始消息: {message}")
-                
-                # 取消心跳任务
+                            # 处理心跳响应
+                            if await self.handle_heartbeat_response(message_data):
+                                continue
+                            
+                            # 处理其他消息
+                            await self.handle_message(message_data, ws)
+                                
+                        except json.JSONDecodeError:
+                            logger.error("消息解析失败")
+                        except Exception as e:
+                            logger.error(f"处理消息时发生错误: {str(e)}")
+                            logger.debug(f"原始消息: {message}")
+                    
+                    # 取消心跳任务
+                    if self.heartbeat_task:
+                        self.heartbeat_task.cancel()
+                        try:
+                            await self.heartbeat_task
+                        except asyncio.CancelledError:
+                            pass
+            except websockets.exceptions.ConnectionClosed as ws_closed:
+                logger.warning(f"WebSocket连接已关闭: {ws_closed}")
+                # 只在WebSocket连接关闭时增加计数
                 if self.heartbeat_task:
                     self.heartbeat_task.cancel()
                     try:
                         await self.heartbeat_task
                     except asyncio.CancelledError:
                         pass
-                    
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning("WebSocket连接已关闭")
-            if self.heartbeat_task:
-                self.heartbeat_task.cancel()
-                try:
-                    await self.heartbeat_task
-                except asyncio.CancelledError:
-                    pass
-            # 等待5秒后重连
-            await asyncio.sleep(5)
-        except ValueError as e:
-            error_msg = str(e)
-            if "获取token失败" in error_msg and "令牌过期" in error_msg:
-                logger.warning("检测到token过期，尝试重新获取cookies...")
-                # 使用playwright获取新的cookies
-                new_cookies_data = await get_login_cookies()
-                if new_cookies_data and "cookies" in new_cookies_data:
-                    # 更新cookies
-                    new_cookies_str = cookies_dict_to_str(new_cookies_data["cookies"])
-                    self.cookies_str = new_cookies_str
-                    self.cookies = new_cookies_data["cookies"]
-                    
-                    # 从cookies中更新用户ID
-                    if "unb" in self.cookies:
-                        self.myid = self.cookies["unb"]
-                    
-                    # 更新设备ID
-                    self.device_id = generate_device_id(self.myid)
-                    
-                    logger.info("成功更新cookies，准备重新连接...")
-                    # 不等待，立即重新连接
+                
+                # 检查是否达到最大WebSocket重连尝试次数
+                if ws_connection_attempts >= max_ws_connection_attempts:
+                    logger.error(f"WebSocket连接失败次数达到上限({max_ws_connection_attempts}次)，将尝试重新获取cookies")
+                    # 强制重新获取cookies
+                    force_manual_login = token_failure_count >= max_token_failures
+                    await self._handle_token_failure(force_manual_login)
+                    # 等待5秒后重试
+                    await asyncio.sleep(5)
                     return
                 else:
-                    logger.error("自动获取新cookies失败")
+                    # 等待5秒后重连
+                    logger.info(f"将进行第 {ws_connection_attempts+1}/{max_ws_connection_attempts} 次WebSocket重连尝试")
+                    await asyncio.sleep(5)
+                    return
+                    
+        except ValueError as e:
+            error_msg = str(e)
+            if "获取token失败" in error_msg and ("令牌过期" in error_msg or "TOKEN_EMPTY" in error_msg or "TOKEN_EXPIRED" in error_msg):
+                logger.warning("检测到token过期或为空，尝试重新获取cookies...")
+                await self._handle_token_failure(token_failure_count >= max_token_failures)
             else:
                 logger.error(f"WebSocket连接出错: {e}")
             # 等待5秒后重连
@@ -866,18 +899,98 @@ class XianyuWebSocket:
             await asyncio.sleep(5)
         finally:
             logger.info("WebSocket连接已关闭，将尝试重新连接")
+    
+    async def _handle_token_failure(self, force_manual_login):
+        """处理token获取失败的情况"""
+        # 检查是否需要强制手动登录
+        if force_manual_login:
+            # 删除保存的浏览器状态，强制用户重新登录
+            data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'data'))
+            state_path = os.path.join(data_dir, 'playwright_state.json')
             
+            if os.path.exists(state_path):
+                try:
+                    os.remove(state_path)
+                    logger.warning("已删除浏览器状态文件，将使用强制手动登录模式")
+                except Exception as e:
+                    logger.error(f"删除浏览器状态文件失败: {e}")
+        
+        # 清晰地指示将启动浏览器
+        if force_manual_login:
+            logger.info("=================================================")
+            logger.info("       由于多次自动登录失败，将使用强制手动登录模式")
+            logger.info("       请在打开的浏览器中手动操作完成登录")
+            logger.info("       需要确保在浏览器中完全退出后重新登录")
+            logger.info("=================================================")
+        else:
+            logger.info("即将打开浏览器窗口，请完成登录操作...")
+        
+        # 使用playwright获取新的cookies
+        try:
+            new_cookies_data = await get_login_cookies(force_login=force_manual_login)
+            
+            if new_cookies_data and "cookies" in new_cookies_data:
+                # 更新cookies
+                new_cookies_str = cookies_dict_to_str(new_cookies_data["cookies"])
+                self.cookies_str = new_cookies_str
+                self.cookies = new_cookies_data["cookies"]
+                
+                # 从cookies中更新用户ID
+                if "unb" in self.cookies:
+                    self.myid = self.cookies["unb"]
+                    logger.info(f"使用新的用户ID: {self.myid}")
+                else:
+                    logger.warning("新获取的cookies中未找到unb字段")
+                
+                # 更新设备ID
+                self.device_id = generate_device_id(self.myid)
+                logger.info(f"更新设备ID: {self.device_id}")
+                
+                logger.info("成功更新cookies，准备重新连接...")
+                return True
+            else:
+                logger.error("自动获取新cookies失败，可能需要手动操作")
+                if new_cookies_data is None:
+                    logger.error("get_login_cookies返回值为None，浏览器可能被关闭或登录超时")
+                else:
+                    logger.error(f"返回的数据格式不正确: {new_cookies_data}")
+                return False
+        except Exception as login_error:
+            logger.error(f"自动登录过程中发生错误: {login_error}")
+            return False
+    
     async def run(self):
         """运行WebSocket客户端，自动重连"""
+        # 记录连续运行失败次数
+        consecutive_failures = 0
+        max_consecutive_failures = 10  # 最大连续失败次数
+
         while True:
             try:
+                # 尝试建立连接
                 await self.connect()
+                # 如果连接成功完成并返回，则重置失败计数
+                consecutive_failures = 0
             except Exception as e:
-                logger.error(f"运行WebSocket客户端时出错: {e}")
+                # 增加失败计数
+                consecutive_failures += 1
+                logger.error(f"运行WebSocket客户端时出错 (第{consecutive_failures}次): {e}")
+                
+                # 如果连续失败次数过多，则尝试强制重新登录
+                if consecutive_failures >= max_consecutive_failures:
+                    logger.critical(f"连续失败次数达到{max_consecutive_failures}次，将尝试强制重新登录")
+                    try:
+                        # 强制重新登录
+                        await self._handle_token_failure(force_manual_login=True)
+                        # 重置失败计数
+                        consecutive_failures = 0
+                    except Exception as login_error:
+                        logger.critical(f"强制重新登录失败: {login_error}")
             
             # 重连延迟
-            logger.info("5秒后尝试重新连接...")
-            await asyncio.sleep(5)
+            delay = min(30, 5 * consecutive_failures)  # 随着失败次数增加延迟时间，但最多30秒
+            logger.info(f"{delay}秒后尝试重新连接...")
+            await asyncio.sleep(delay)
 
 class XianyuLive(XianyuWebSocket):
     """
