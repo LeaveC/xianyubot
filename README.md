@@ -6,6 +6,8 @@
 
 # 🚀 XianyuBot
 
+<img src="./assets/logo.png" alt="XianyuBot Logo" width="180">
+
 模块化闲鱼客服机器人系统，实现闲鱼平台7×24小时自动化值守，支持多专家协同决策、智能议价和上下文感知对话。
 
 <p align="center">
